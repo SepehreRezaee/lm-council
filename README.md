@@ -92,6 +92,84 @@ asyncio.run(main())
 - Unit tests avoid real OpenRouter calls by monkeypatching `LanguageModelCouncil.get_text_completions` / `judge` and by faking the OpenRouter rate-limit endpoint. You can follow the same pattern when running in environments without network access.
 - `LanguageModelCouncil.save(outdir)` writes `models.json`, `user_prompts.json`, `completions.jsonl`, `judge_ratings.jsonl`, and `eval_config.json`. `LanguageModelCouncil.load(path, openrouter_api_key=...)` restores a council and now accepts a key explicitly for clarity in CI.
 
+## FastAPI service
+
+Run a lightweight API server to drive the council via HTTP:
+
+```bash
+uvicorn lm_council.api.server:app --host 0.0.0.0 --port 8000
+```
+
+Key endpoints:
+- `GET /health` – readiness probe.
+- `GET /configs` – available preset evaluation configs.
+- `POST /council/run` – body: `{"models": [...], "prompts": ["Say hi"], "eval_config_key": "default_rubric", "judge_models": [...optional], "completion_max_tokens": 256, "judge_max_tokens": 256, "openrouter_api_key": "...optional..."}`. Returns completions and judgments.
+- `POST /threads` / `GET /threads/{thread_id}` – upsert and retrieve chat threads stored in Mongo (default: `council` db, `council-chats` collection; override with `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION`).
+
+### Running locally
+
+1) Install deps (includes FastAPI, uvicorn, motor):
+```bash
+poetry install
+# or
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+```
+2) Set env vars:
+```
+export OPENROUTER_API_KEY="your_key"
+# optional Mongo overrides:
+# export MONGO_URI="mongodb://localhost:27017"
+# export MONGO_DB="council"
+# export MONGO_COLLECTION="council-chats"
+```
+3) Start the server:
+```bash
+uvicorn lm_council.api.server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### Calling with Postman (or curl)
+
+- Health check:
+  - Method: GET
+  - URL: `http://localhost:8000/health`
+
+- List configs:
+  - Method: GET
+  - URL: `http://localhost:8000/configs`
+
+- Run council:
+  - Method: POST
+  - URL: `http://localhost:8000/council/run`
+  - Body (JSON), example:
+    ```json
+    {
+      "models": ["openai/gpt-4o-mini", "openai/gpt-4o"],
+      "prompts": ["Say hello."],
+      "eval_config_key": "default_rubric",
+      "completion_max_tokens": 256,
+      "judge_max_tokens": 256
+    }
+    ```
+  - Headers: `Content-Type: application/json`
+
+- Upsert a thread:
+  - Method: POST
+  - URL: `http://localhost:8000/threads`
+  - Body:
+    ```json
+    {
+      "thread_id": "thread-123",
+      "messages": [{"role": "user", "content": "hi"}],
+      "metadata": {"source": "postman"}
+    }
+    ```
+
+- Get a thread:
+  - Method: GET
+  - URL: `http://localhost:8000/threads/thread-123`
+
+If you use Postman, set the Body to raw JSON and add any auth headers you need (API key is read from env or supplied in the run body).
+
 ## About the Paper [NAACL 2025, Main]
 
 Our paper, "Language Model Council: Democratically Benchmarking Foundation Models on Highly Subjective Tasks", focuses on a case study involving 20 large language models (LLMs) to evaluate each other on a highly subjective emotional intelligence task, and was the first to study the application of LLM-as-a-Judge in a democratic setting.
