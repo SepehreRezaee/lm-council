@@ -22,17 +22,19 @@ async def main(eval_type: str):
     )
     lmc = LanguageModelCouncil(
         models=[
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
             "meta-llama/llama-3.1-8b-instruct",
-            "deepseek/deepseek-r1-0528",
-            "google/gemini-2.5-flash-lite-preview-06-17",
-            "x-ai/grok-3-mini",
+            "mistralai/mixtral-8x7b-instruct",
         ],
         judge_models=[
-            "google/gemini-2.5-flash-lite-preview-06-17",
-            "x-ai/grok-3-mini",
-            "deepseek/deepseek-r1-0528",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
+            "meta-llama/llama-3.1-8b-instruct",
         ],
         eval_config=PRESET_EVAL_CONFIGS[eval_config_key],
+        completion_max_tokens=256,
+        judge_max_tokens=256,
     )
 
     completions, judgements = await lmc.execute(

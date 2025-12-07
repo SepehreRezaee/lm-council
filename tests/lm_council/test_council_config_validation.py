@@ -34,6 +34,23 @@ def test_rate_limit_fallback(monkeypatch):
     assert council._limiter_interval_seconds == 10
 
 
+def test_rate_limit_clamps_to_minimum(monkeypatch):
+    class DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": {"rate_limit": {"requests": 0, "interval": "0s"}}}
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "dummy")
+    monkeypatch.setattr("lm_council.council.requests.get", lambda *a, **k: DummyResponse())
+
+    council = LanguageModelCouncil(models=["model-a"], openrouter_api_key="dummy")
+
+    assert council._limiter_max_calls == 1
+    assert council._limiter_interval_seconds == 1
+
+
 @pytest.mark.asyncio
 async def test_random_pairwise_config_respected(monkeypatch):
     # Build a random pairwise config with a single pair sample.
@@ -62,7 +79,7 @@ async def test_random_pairwise_config_respected(monkeypatch):
 
     monkeypatch.setattr("lm_council.council.requests.get", lambda *a, **k: DummyResponse())
     council = LanguageModelCouncil(
-        models=["model-a", "model-b", "model-c"],
+        models=["openai/gpt-4o-mini", "meta-llama/llama-3.1-8b-instruct", "mistralai/mixtral-8x7b-instruct"],
         eval_config=eval_config,
         openrouter_api_key="dummy",
     )

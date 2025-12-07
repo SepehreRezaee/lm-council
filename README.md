@@ -57,11 +57,13 @@ def main():
 
     lmc = LanguageModelCouncil(
         models=[
-            "deepseek/deepseek-r1-0528",
-            "google/gemini-2.5-flash-lite-preview-06-17",
-            "x-ai/grok-3-mini",
+            "openai/gpt-4o-mini",
+            "openai/gpt-4o",
             "meta-llama/llama-3.1-8b-instruct",
+            "mistralai/mixtral-8x7b-instruct",
         ],
+        completion_max_tokens=256,
+        judge_max_tokens=256,
     )
 
     # Run the council on any prompt of your choosing.

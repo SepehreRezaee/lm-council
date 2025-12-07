@@ -14,7 +14,7 @@ import seaborn as sns
 import tqdm.asyncio
 from aiolimiter import AsyncLimiter
 from datasets import Dataset, DatasetDict, Features, Value
-from huggingface_hub import HfApi, HfFolder
+from huggingface_hub import HfApi
 from openai import AsyncOpenAI
 
 from lm_council.analysis.pairwise.affinity import get_affinity_df
@@ -57,9 +57,13 @@ class LanguageModelCouncil:
         judge_models: list[str] | None = None,
         eval_config: EvaluationConfig | None = PRESET_EVAL_CONFIGS["default_rubric"],
         openrouter_api_key: str | None = None,
+        completion_max_tokens: int = 512,
+        judge_max_tokens: int = 512,
     ):
         self.models = models
         self.eval_config = eval_config
+        self.completion_max_tokens = completion_max_tokens
+        self.judge_max_tokens = judge_max_tokens
 
         self.judge_models = judge_models
         # If no judge models are provided, use the same models for judging.
@@ -149,8 +153,10 @@ class LanguageModelCouncil:
             if not rate_limit:
                 raise ValueError("Missing rate_limit metadata in response.")
 
-            max_calls = int(rate_limit["requests"])
-            interval_seconds = cls._parse_rate_limit_interval(rate_limit["interval"])
+            max_calls = max(1, int(rate_limit["requests"]))
+            interval_seconds = max(
+                1, cls._parse_rate_limit_interval(rate_limit["interval"])
+            )
             return max_calls, interval_seconds
         except Exception as exc:
             print(
@@ -181,6 +187,7 @@ class LanguageModelCouncil:
                 ],
                 temperature=self.eval_config.temperature,
                 response_model=schema_class,
+                max_tokens=self.judge_max_tokens,
                 extra_body={"provider": {"require_parameters": True}},
             )
         )
@@ -210,6 +217,7 @@ class LanguageModelCouncil:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=temperature,
+                max_tokens=self.completion_max_tokens,
             )
         )
 
@@ -374,6 +382,7 @@ class LanguageModelCouncil:
                 ],
                 temperature=temperature,
                 response_model=schema_class,
+                max_tokens=self.judge_max_tokens,
                 extra_body={"provider": {"require_parameters": True}},
             )
         )

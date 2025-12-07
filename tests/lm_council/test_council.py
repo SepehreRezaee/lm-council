@@ -32,9 +32,9 @@ async def test_language_model_council(monkeypatch, tmp_path):
 
     lmc = LanguageModelCouncil(
         models=[
-            "google/gemini-2.5-flash-lite-preview-06-17",
+            "openai/gpt-4o-mini",
             "meta-llama/llama-3.1-8b-instruct",
-            "x-ai/grok-3-mini",
+            "mistralai/mixtral-8x7b-instruct",
         ],
         openrouter_api_key="test-key",
     )

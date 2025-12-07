@@ -42,5 +42,5 @@ config:
   position_flipping: false
   algorithm_config:
     reference_models:
-    - google/gemini-2.5-flash-lite-preview-06-17
+    - openai/gpt-4o-mini
 reps: 1
