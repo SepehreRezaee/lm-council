@@ -83,6 +83,13 @@ def main():
 asyncio.run(main())
 ```
 
+- The library requires an `OPENROUTER_API_KEY`. If you omit it, `LanguageModelCouncil` will raise to keep failures obvious. For offline testing you can pass a dummy key (or set the env var) and stub the API calls as shown in the tests.
+
+### Testing and offline use
+
+- Unit tests avoid real OpenRouter calls by monkeypatching `LanguageModelCouncil.get_text_completions` / `judge` and by faking the OpenRouter rate-limit endpoint. You can follow the same pattern when running in environments without network access.
+- `LanguageModelCouncil.save(outdir)` writes `models.json`, `user_prompts.json`, `completions.jsonl`, `judge_ratings.jsonl`, and `eval_config.json`. `LanguageModelCouncil.load(path, openrouter_api_key=...)` restores a council and now accepts a key explicitly for clarity in CI.
+
 ## About the Paper [NAACL 2025, Main]
 
 Our paper, "Language Model Council: Democratically Benchmarking Foundation Models on Highly Subjective Tasks", focuses on a case study involving 20 large language models (LLMs) to evaluate each other on a highly subjective emotional intelligence task, and was the first to study the application of LLM-as-a-Judge in a democratic setting.

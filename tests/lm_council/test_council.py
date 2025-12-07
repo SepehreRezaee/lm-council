@@ -1,27 +1,75 @@
+import asyncio
 import shutil
 
 import dotenv
+import pandas as pd
 import pytest
+import requests
 
 from lm_council import LanguageModelCouncil
 
 
+def _fake_completion(prompt: str, model: str):
+    return {
+        "user_prompt": prompt,
+        "model": model,
+        "completion_text": f"{model} response to {prompt}",
+        "completion_tokens": 1,
+        "prompt_tokens": 1,
+        "total_tokens": 2,
+    }
+
+
 @pytest.mark.asyncio
-async def test_language_model_council():
+async def test_language_model_council(monkeypatch, tmp_path):
     dotenv.load_dotenv()
+
+    class DummyResponse:
+        def raise_for_status(self):
+            raise requests.RequestException("fail")
+
+    monkeypatch.setattr("lm_council.council.requests.get", lambda *a, **k: DummyResponse())
 
     lmc = LanguageModelCouncil(
         models=[
             "google/gemini-2.5-flash-lite-preview-06-17",
             "meta-llama/llama-3.1-8b-instruct",
             "x-ai/grok-3-mini",
-        ]
+        ],
+        openrouter_api_key="test-key",
     )
 
-    await lmc.execute("Say hello.")
+    async def fake_get_text_completions(user_prompt: str, temperature: float | None):
+        return [
+            asyncio.sleep(0, result=_fake_completion(user_prompt, model))
+            for model in lmc.models
+        ]
 
-    lmc.save("tests/testdata/sample_session")
-    lmc.load("tests/testdata/sample_session")
-    shutil.rmtree("tests/testdata/sample_session")
+    async def fake_judge(completions_df: pd.DataFrame):
+        # Return a simple rubric-style judgment dataframe without API calls.
+        rows = []
+        for _, row in completions_df.iterrows():
+            rows.append(
+                {
+                    "user_prompt": row["user_prompt"],
+                    "judge_model": lmc.judge_models[0],
+                    "model_being_judged": row["model"],
+                    "Coherence": 5,
+                    "Relevance": 5,
+                    "Overall": 5.0,
+                }
+            )
+        return pd.DataFrame(rows)
 
-    assert lmc.get_completions_df().shape[0] == 3
+    monkeypatch.setattr(lmc, "get_text_completions", fake_get_text_completions)
+    monkeypatch.setattr(lmc, "judge", fake_judge)
+
+    completions_df, judgments_df = await lmc.execute("Say hello.")
+
+    outdir = tmp_path / "sample_session"
+    lmc.save(outdir)
+    LanguageModelCouncil.load(outdir, openrouter_api_key="test-key")
+    shutil.rmtree(outdir)
+
+    assert completions_df.shape[0] == 3
+    assert judgments_df.shape[0] == 3

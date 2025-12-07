@@ -2,6 +2,7 @@ import json
 import os
 import random
 import re
+from typing import Tuple
 
 import aiohttp
 import instructor
@@ -55,6 +56,7 @@ class LanguageModelCouncil:
         models: list[str],
         judge_models: list[str] | None = None,
         eval_config: EvaluationConfig | None = PRESET_EVAL_CONFIGS["default_rubric"],
+        openrouter_api_key: str | None = None,
     ):
         self.models = models
         self.eval_config = eval_config
@@ -65,7 +67,11 @@ class LanguageModelCouncil:
             # Use the same models for judging.
             self.judge_models = models
 
-        api_key = os.getenv("OPENROUTER_API_KEY")
+        api_key = openrouter_api_key or os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENROUTER_API_KEY is required. Set it in the environment or pass openrouter_api_key."
+            )
         self.client = AsyncOpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
@@ -78,20 +84,11 @@ class LanguageModelCouncil:
             self.client_structured, mode=instructor.Mode.JSON
         )
 
-        # ───── Fetch key-specific rate limits once ──────────
-        key_meta = requests.get(
-            "https://openrouter.ai/api/v1/auth/key",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=10,
-        ).json()["data"]["rate_limit"]
-
-        max_calls = key_meta["requests"]  # 100
-        interval_seconds = (
-            10
-            if key_meta["interval"].endswith("s")
-            else int(key_meta["interval"][:-1])  # handle "1m", "2h", etc.
-        )
+        # ───── Fetch key-specific rate limits once (with safe fallback) ──────────
+        max_calls, interval_seconds = self._fetch_rate_limit(api_key)
         self._limiter = AsyncLimiter(max_calls, interval_seconds)
+        self._limiter_max_calls = max_calls
+        self._limiter_interval_seconds = interval_seconds
 
         # If we're doing pairwise_comparisons with fixed_reference_model(s), check that each of the
         # models in config.algorithm_config.reference_models is also included in our completion
@@ -120,6 +117,47 @@ class LanguageModelCouncil:
 
         # List of all judgments.
         self.judgments = []
+
+    @staticmethod
+    def _parse_rate_limit_interval(interval_str: str) -> int:
+        """Parse interval strings like '10s', '1m', '2h' to seconds."""
+        if interval_str.endswith("s"):
+            return int(interval_str[:-1])
+        if interval_str.endswith("m"):
+            return int(interval_str[:-1]) * 60
+        if interval_str.endswith("h"):
+            return int(interval_str[:-1]) * 3600
+        raise ValueError(f"Unrecognized interval string: {interval_str}")
+
+    @classmethod
+    def _fetch_rate_limit(cls, api_key: str) -> Tuple[int, int]:
+        """
+        Fetch OpenRouter rate limit metadata.
+
+        Returns (max_calls, interval_seconds). Falls back to a conservative default on failure.
+        """
+        fallback = (5, 10)
+        try:
+            response = requests.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json()
+            rate_limit = data.get("data", {}).get("rate_limit")
+            if not rate_limit:
+                raise ValueError("Missing rate_limit metadata in response.")
+
+            max_calls = int(rate_limit["requests"])
+            interval_seconds = cls._parse_rate_limit_interval(rate_limit["interval"])
+            return max_calls, interval_seconds
+        except Exception as exc:
+            print(
+                f"Warning: Unable to fetch OpenRouter rate limits; "
+                f"falling back to default limiter {fallback} seconds. ({exc})"
+            )
+            return fallback
 
     async def _with_rate_limit(self, coro):
         """Run any OpenRouter coroutine under the global AsyncLimiter."""
@@ -239,11 +277,17 @@ class LanguageModelCouncil:
                 ]
 
                 # Get the judge prompt.
+                prompt_fields = {
+                    "criteria_verbalized": criteria_verbalized,
+                    "likert_scale_verbalized": likert_scale_verbalized,
+                    "user_prompt": user_prompt,
+                    "response": row["completion_text"],
+                }
+                check_prompt_template_contains_all_placeholders(
+                    self.eval_config.config.prompt_template, prompt_fields
+                )
                 judge_prompt = self.eval_config.config.prompt_template.format(
-                    criteria_verbalized=criteria_verbalized,
-                    likert_scale_verbalized=likert_scale_verbalized,
-                    user_prompt=user_prompt,
-                    response=row["completion_text"],
+                    **prompt_fields
                 )
 
                 schema_class = create_dynamic_schema(self.eval_config)
@@ -377,11 +421,23 @@ class LanguageModelCouncil:
         if pairwise_comparison_config.algorithm_type == "all_pairs":
             # No filtering needed.
             pass
-        elif pairwise_comparison_config.algorithm_type == "random_pairs":
+        elif pairwise_comparison_config.algorithm_type in {"random", "random_pairs"}:
+            if (
+                not pairwise_comparison_config.algorithm_config
+                or not hasattr(
+                    pairwise_comparison_config.algorithm_config, "n_random_pairs"
+                )
+            ):
+                raise ValueError(
+                    "algorithm_config with n_random_pairs is required when algorithm_type is 'random'."
+                )
             # Generate a random sample of pairs of completions.
             completion_pairs = random.sample(
                 completion_pairs,
-                pairwise_comparison_config.n_random_pairs,
+                min(
+                    len(completion_pairs),
+                    pairwise_comparison_config.algorithm_config.n_random_pairs,
+                ),
             )
         elif pairwise_comparison_config.algorithm_type == "fixed_reference_models":
             # Use llm1 as a fixed reference model.
@@ -391,6 +447,11 @@ class LanguageModelCouncil:
                 if pair[0]
                 in pairwise_comparison_config.algorithm_config.reference_models
             ]
+        else:
+            raise ValueError(
+                f"Unknown algorithm_type: {pairwise_comparison_config.algorithm_type}. "
+                "Expected one of {'all_pairs', 'random', 'fixed_reference_models'}."
+            )
 
         # Apply positional flipping.
         # NOTE: This must happen after filtering down the pairs.
@@ -869,9 +930,12 @@ This dataset was generated using the [LLM Council](https://github.com/llm-counci
         self.eval_config.save_config(os.path.join(outdir, "eval_config.json"))
 
     @staticmethod
-    def load(indir: str) -> "LanguageModelCouncil":
+    def load(
+        indir: str, openrouter_api_key: str | None = None
+    ) -> "LanguageModelCouncil":
         """
-        Load a LanguageModelCouncil instance from a directory.
+        Load a LanguageModelCouncil instance from a directory. Provide openrouter_api_key
+        (or set the env var) so the reconstructed council can make API calls.
 
         indir/
             models.json
@@ -908,7 +972,11 @@ This dataset was generated using the [LLM Council](https://github.com/llm-counci
         )
 
         # Create the instance
-        council = LanguageModelCouncil(models=models, eval_config=eval_config)
+        council = LanguageModelCouncil(
+            models=models,
+            eval_config=eval_config,
+            openrouter_api_key=openrouter_api_key,
+        )
         council.user_prompts = user_prompts
         council.completions = completions
         council.judgments = judgments
