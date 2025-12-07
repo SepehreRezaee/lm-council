@@ -2,9 +2,11 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, FastAPI, HTTPException
-from pydantic import BaseModel, Field, validator
+from fastapi import APIRouter, BackgroundTasks, FastAPI, HTTPException
 from datetime import datetime, timezone
+from uuid import uuid4
+
+from pydantic import BaseModel, Field, validator
 
 from lm_council import LanguageModelCouncil
 from lm_council.api.db import MongoConfig, ensure_indexes, get_collection
@@ -22,6 +24,9 @@ class RunRequest(BaseModel):
     prompts: List[str] | str = Field(..., description="Single prompt or list of prompts.")
     judge_models: Optional[List[str]] = Field(
         None, description="Optional override for judge models. Defaults to models."
+    )
+    thread_id: Optional[str] = Field(
+        None, description="Optional thread id. If omitted, a UUID will be generated and returned."
     )
     eval_config_key: str = Field(
         "default_rubric", description="Key of preset evaluation config to use."
@@ -62,6 +67,7 @@ class RunRequest(BaseModel):
 
 
 class RunResponse(BaseModel):
+    thread_id: str
     completions: List[Dict[str, Any]]
     judgments: List[Dict[str, Any]]
 
@@ -73,6 +79,9 @@ class ConfigListResponse(BaseModel):
 class ChatMessage(BaseModel):
     role: str = Field(..., description="Role of the speaker: user|assistant|system|judge")
     content: str = Field(..., description="Message content")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict, description="Structured metadata for this turn"
+    )
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc),
         description="Timestamp of the message (UTC)",
@@ -141,12 +150,54 @@ class CouncilRunner:
             judge_max_tokens=payload.judge_max_tokens,
         )
 
-    async def run(self, payload: RunRequest) -> RunResponse:
+    async def run(self, payload: RunRequest) -> tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         council = self._build_council(payload)
         completions_df, judgments_df = await council.execute(payload.prompts)
-        return RunResponse(
-            completions=completions_df.to_dict(orient="records"),
-            judgments=judgments_df.to_dict(orient="records"),
+        thread_id = payload.thread_id or str(uuid4())
+        completions = completions_df.to_dict(orient="records")
+        judgments = judgments_df.to_dict(orient="records")
+        return thread_id, completions, judgments
+
+    async def persist_thread_turn(
+        self,
+        thread_id: str,
+        prompts: List[str],
+        completions: List[Dict[str, Any]],
+        judgments: List[Dict[str, Any]],
+    ) -> None:
+        """Asynchronously upsert a chat thread turn into Mongo."""
+        coll = await get_collection()
+        now = datetime.now(timezone.utc)
+
+        user_messages = [
+            ChatMessage(
+                role="user",
+                content=p,
+                metadata={"type": "prompt"},
+                created_at=now,
+            ).model_dump()
+            for p in prompts
+        ]
+
+        assistant_message = ChatMessage(
+            role="assistant",
+            content="Council run completed",
+            metadata={"completions": completions, "judgments": judgments},
+            created_at=now,
+        ).model_dump()
+
+        await coll.update_one(
+            {"thread_id": thread_id},
+            {
+                "$setOnInsert": {
+                    "thread_id": thread_id,
+                    "created_at": now,
+                    "metadata": {},
+                },
+                "$set": {"updated_at": now},
+                "$push": {"messages": {"$each": [*user_messages, assistant_message]}},
+            },
+            upsert=True,
         )
 
 
@@ -176,7 +227,7 @@ async def list_configs() -> ConfigListResponse:
 
 
 @council_router.post("/council/run", response_model=RunResponse)
-async def run_council(payload: RunRequest) -> RunResponse:
+async def run_council(payload: RunRequest, background_tasks: BackgroundTasks) -> RunResponse:
     logger.info(
         "Starting council run with %d models, %d prompt(s), eval_config=%s",
         len(payload.models),
@@ -184,9 +235,20 @@ async def run_council(payload: RunRequest) -> RunResponse:
         payload.eval_config_key,
     )
     try:
-        response = await runner.run(payload)
+        thread_id, completions, judgments = await runner.run(payload)
+        background_tasks.add_task(
+            runner.persist_thread_turn,
+            thread_id,
+            payload.prompts,
+            completions,
+            judgments,
+        )
         logger.info("Council run completed")
-        return response
+        return RunResponse(
+            thread_id=thread_id,
+            completions=completions,
+            judgments=judgments,
+        )
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - logged as server error

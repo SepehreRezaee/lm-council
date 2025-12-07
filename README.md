@@ -105,6 +105,7 @@ Key endpoints:
 - `GET /configs` – available preset evaluation configs.
 - `POST /council/run` – body: `{"models": [...], "prompts": ["Say hi"], "eval_config_key": "default_rubric", "judge_models": [...optional], "completion_max_tokens": 256, "judge_max_tokens": 256, "openrouter_api_key": "...optional..."}`. Returns completions and judgments.
 - `POST /threads` / `GET /threads/{thread_id}` – upsert and retrieve chat threads stored in Mongo (default: `council` db, `council-chats` collection; override with `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION`).
+  - If you call `/council/run` with no `thread_id`, the server generates a UUID, creates (or updates) the thread, appends user prompts and an assistant message containing completions/judgments, and returns the `thread_id` so you can continue the conversation.
 
 ### Running locally
 

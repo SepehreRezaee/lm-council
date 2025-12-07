@@ -33,8 +33,23 @@ class InMemoryAsyncCollection:
         self.data = {}
 
     async def update_one(self, filter, update, upsert=False):
-        doc = update.get("$set", {})
-        self.data[filter["thread_id"]] = doc
+        tid = filter["thread_id"]
+        existing = self.data.get(tid, {"messages": []})
+
+        if "$setOnInsert" in update and tid not in self.data:
+            existing.update(update["$setOnInsert"])
+
+        if "$set" in update:
+            existing.update(update["$set"])
+
+        if "$push" in update and "messages" in update["$push"]:
+            push_spec = update["$push"]["messages"]
+            if isinstance(push_spec, dict) and "$each" in push_spec:
+                existing.setdefault("messages", []).extend(push_spec["$each"])
+            else:
+                existing.setdefault("messages", []).append(push_spec)
+
+        self.data[tid] = existing
 
     async def find_one(self, filter, projection=None):
         doc = self.data.get(filter["thread_id"])
@@ -86,6 +101,7 @@ def test_run_council_success(client):
     body = resp.json()
     assert len(body["completions"]) == 2
     assert len(body["judgments"]) == 1
+    assert "thread_id" in body
 
 
 def test_thread_crud(client):
